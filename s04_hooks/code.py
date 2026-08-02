@@ -161,36 +161,71 @@ def trigger_hooks(event: str, *args):
         result = callback(*args)
         if result is not None:  # teaching shortcut: block this tool call
             return result
+
+# ------------------------------------------------------------------
+#  s03 permission pipeline, restored as data-driven rules.
+#  permission_hook is now a thin wrapper - rules live in data,
+#  the hook just plugs the pipeline into the PreToolUse event.
+# ------------------------------------------------------------------
+
+# Gate 1: hard deny list - always forbidden
+DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
+
+def check_deny_list(command: str) -> str | None:
+    for pattern in DENY_LIST:
+        if pattern in command:
+            return f"Blocked: '{pattern}' is on the deny list"
     return None
 
+# Gate 2: rule matching - context-dependent checks (data-driven)
+PERMISSION_RULES = [
+    {"tools": ["read_file", "write_file", "edit_file"],
+     "check": lambda args: not (WORKDIR / args.get("path", "")).resolve().is_relative_to(WORKDIR),
+     "message": "Access outside workspace"},
+    {"tools": ["write_file"],
+     "check": lambda args: "fuck" in args.get("content", ""),
+     "message": "Content contains banned word"},
+    {"tools": ["edit_file"],
+     "check": lambda args: "fuck" in args.get("new_text", ""),
+     "message": "Content contains banned word"},
+    {"tools": ["bash"],
+     "check": lambda args: "fuck" in args.get("command", ""),
+     "message": "Command contains banned word"},
+    {"tools": ["bash"],
+     "check": lambda args: any(kw in args.get("command", "") for kw in ["rm ", "> /etc/", "chmod 777"]),
+     "message": "Potentially destructive command"},
+]
 
-# s03 permission check logic, now wrapped as a hook
-DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
-DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
+def check_rules(tool_name: str, args: dict) -> str | None:
+    for rule in PERMISSION_RULES:
+        if tool_name in rule["tools"] and rule["check"](args):
+            return rule["message"]
+    return None
+
+# Gate 3: user approval - wait for confirmation after rule match
+def ask_user(tool_name: str, args: dict, reason: str) -> str:
+    print(f"\n\033[33m⚠  {reason}\033[0m")
+    print(f"   Tool: {tool_name}({args})")
+    choice = input("   Allow? [y/N] ").strip().lower()
+    return "allow" if choice in ("y", "yes") else "deny"
+
+# Pipeline: three gates chained; returns None if allowed, reason if denied
+def check_permission(block) -> str | None:
+    if block.name == "bash":
+        reason = check_deny_list(block.input.get("command", ""))
+        if reason:
+            print(f"\n\033[31m⛔ {reason}\033[0m")
+            return reason
+    reason = check_rules(block.name, block.input)
+    if reason:
+        decision = ask_user(block.name, block.input, reason)
+        if decision == "deny":
+            return "Permission denied by user"
+    return None
 
 def permission_hook(block):
-    """PreToolUse: s03 check_permission() logic moved here."""
-    if block.name == "bash":
-        for pattern in DENY_LIST:
-            if pattern in block.input.get("command", ""):
-                print(f"\n\033[31m⛔ Blocked: '{pattern}'\033[0m")
-                return "Permission denied by deny list"
-        for kw in DESTRUCTIVE:
-            if kw in block.input.get("command", ""):
-                print(f"\n\033[33m⚠  Potentially destructive command\033[0m")
-                print(f"   Tool: {block.name}({block.input})")
-                choice = input("   Allow? [y/N] ").strip().lower()
-                if choice not in ("y", "yes"):
-                    return "Permission denied by user"
-    if block.name in ("read_file", "write_file", "edit_file"):
-        path = block.input.get("path", "")
-        if not (WORKDIR / path).resolve().is_relative_to(WORKDIR):
-            print(f"\n\033[33m⚠  Access outside workspace\033[0m")
-            print(f"   Tool: {block.name}({block.input})")
-            choice = input("   Allow? [y/N] ").strip().lower()
-            if choice not in ("y", "yes"):
-                return "Permission denied by user"
-    return None
+    """PreToolUse: thin wrapper - s03's data-driven pipeline as a hook."""
+    return check_permission(block)
 
 def log_hook(block):
     """PreToolUse: log every tool call."""
@@ -209,14 +244,20 @@ def context_inject_hook(query: str):
     print(f"\033[90m[HOOK] UserPromptSubmit: working in {WORKDIR}\033[0m")
     return None
 
-# Stop hook: print summary when loop is about to exit
-def summary_hook(messages: list):
+# Stop hook: print summary when loop is about to exit.
+# Receives stop_hook_active so it can see whether this stop is a re-entry
+# after a forced continuation (CC: stopHookActive guard).
+def summary_hook(messages: list, stop_hook_active: bool = False):
     tool_count = sum(1 for m in messages
                      for b in (m.get("content") if isinstance(m.get("content"), list) else [])
                      if isinstance(b, dict) and b.get("type") == "tool_result")
+    if stop_hook_active:
+        print("\033[90m[HOOK] Stop: stop_hook_active=True - hooks cannot block again\033[0m")
     print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
+    # Stop 非 None = 强制续跑(force continuation):该值作为 user 消息注入,循环 continue 不退出。summary_hook 打印"对话总结"
     return None
 
+# 注册hook
 register_hook("UserPromptSubmit", context_inject_hook)
 register_hook("PreToolUse", permission_hook)
 register_hook("PreToolUse", log_hook)
@@ -225,12 +266,14 @@ register_hook("Stop", summary_hook)
 
 
 # ═══════════════════════════════════════════════════════════
-#  agent_loop — same structure as s03, but no hard-coded check
+#  agent_loop - same structure as s03, but no hard-coded check
 #  s03: if not check_permission(block): ...
 #  s04: if trigger_hooks("PreToolUse", block): ...
+#  s04+: stopHookActive guard - a forced Stop-hook continuation can only
+#        happen once per stop; on the next stop the loop exits no matter what.
 # ═══════════════════════════════════════════════════════════
 
-def agent_loop(messages: list):
+def agent_loop(messages: list, stop_hook_active: bool = False):
     while True:
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
@@ -238,10 +281,15 @@ def agent_loop(messages: list):
         )
         messages.append({"role": "assistant", "content": response.content})
 
+        # 职责外移、循环零改动
         if response.stop_reason != "tool_use":
-            force = trigger_hooks("Stop", messages)
-            if force:
+            # CC stopHookActive guard: stop hooks still run (and receive the
+            # flag), but a forced continuation is honored only once.
+            # Stop 非 None = 强制续跑
+            force = trigger_hooks("Stop", messages, stop_hook_active)
+            if force and not stop_hook_active:
                 messages.append({"role": "user", "content": force})
+                stop_hook_active = True
                 continue
             return
 
