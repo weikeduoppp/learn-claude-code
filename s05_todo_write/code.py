@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 s05: TodoWrite — add a planning tool on top of s04 hooks.
 
@@ -116,7 +118,7 @@ def run_glob(pattern: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
-
+# 不容易跑偏，也就是提高任务完成的稳定性和完整性
 # ═══════════════════════════════════════════════════════════
 #  NEW in s05: todo_write tool — plan only, no execution
 # ═══════════════════════════════════════════════════════════
