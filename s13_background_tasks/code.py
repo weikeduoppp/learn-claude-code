@@ -20,6 +20,8 @@ Note: Teaching code keeps a basic agent loop to stay focused on background
 tasks. S11's full error recovery (RecoveryState, backoff, escalation,
 reactive compact, fallback model) is omitted.
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random, threading
 from pathlib import Path

@@ -26,6 +26,8 @@ Builds on s02 (multi-tool). Usage:
     python s03_permission/code.py
     Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
 """
+from __future__ import annotations
+
 
 import os, subprocess
 from pathlib import Path

@@ -31,6 +31,8 @@ Builds on s07 (skill loading). Usage:
     python s08_context_compact/code.py
     Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
 """
+from __future__ import annotations
+
 
 import ast, json, os, subprocess, time
 from pathlib import Path

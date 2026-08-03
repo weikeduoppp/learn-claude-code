@@ -25,6 +25,8 @@ Changes from s06:
 Run: python s07_skill_loading/code.py
 Needs: pip install anthropic python-dotenv pyyaml + ANTHROPIC_API_KEY in .env
 """
+from __future__ import annotations
+
 
 import ast, json, os, subprocess
 from pathlib import Path

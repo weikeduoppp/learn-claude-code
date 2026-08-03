@@ -23,6 +23,8 @@ ASCII flow:
   Teammate: dispatch → handler → BUS.send("shutdown_response", {request_id}) ─→ Lead inbox
   Lead: consume_lead_inbox → match_response(request_id) → pending_requests[req_id].status = approved
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random, threading
 from pathlib import Path

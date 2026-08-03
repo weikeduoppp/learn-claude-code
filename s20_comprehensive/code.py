@@ -10,6 +10,8 @@ together: dispatch, permission, hooks, todo, subagent, skills, compaction,
 memory, prompt assembly, error recovery, task graph, background tasks, cron,
 teams, protocols, autonomous agents, worktrees, and MCP.
 """
+from __future__ import annotations
+
 
 import ast, json, os, subprocess, time, random, threading, re
 from pathlib import Path

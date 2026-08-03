@@ -21,6 +21,8 @@ Four layers:
   3. Queue processor: wakes the agent when queued work exists and it is idle
   4. Consumer: agent_loop consumes queued jobs and injects them into messages
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random, threading
 from pathlib import Path

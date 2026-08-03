@@ -35,6 +35,8 @@ NOT a teaching session -- this is the "put it all together" reference.
 
     REPL commands: /compact /tasks /team /inbox
 """
+from __future__ import annotations
+
 
 import json
 import os

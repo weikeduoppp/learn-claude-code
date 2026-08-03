@@ -25,6 +25,8 @@ ASCII topology:
     ├── .tasks/task_xxx.json (worktree: "auth")
     └── .worktrees/events.jsonl
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random, threading, re
 from pathlib import Path

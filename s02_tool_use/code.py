@@ -12,6 +12,8 @@ s02: Tool Use — 在 s01 基础上新增 4 个工具 + 分发映射。
 
 循环本身（agent_loop）与 s01 完全一致。
 """
+from __future__ import annotations
+
 
 import os, subprocess
 from pathlib import Path

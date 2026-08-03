@@ -1,0 +1,7 @@
+import re
+
+
+def slugify(text: str) -> str:
+    """Convert text into a simple URL-friendly slug."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower())
+    return slug.strip("-")

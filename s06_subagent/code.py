@@ -27,6 +27,8 @@ Changes from s05:
 Run: python s06_subagent/code.py
 Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
 """
+from __future__ import annotations
+
 
 import ast, json, os, subprocess
 from pathlib import Path
@@ -54,6 +56,7 @@ SYSTEM = (
     "For complex sub-problems, use the task tool to spawn a subagent."
 )
 
+# 新增子系统 prompt
 # s06: subagent gets its own system prompt — no task, no recursion
 SUB_SYSTEM = (
     f"You are a coding agent at {WORKDIR}. "
@@ -248,7 +251,7 @@ def spawn_subagent(description: str) -> str:
     print(f"\033[35m[Subagent done]\033[0m")
     return result  # only summary, entire message history discarded
 
-# Add task tool to parent's tools
+# Add task tool to parent's tools 单独添加
 TOOLS.append({
     "name": "task",
     "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",

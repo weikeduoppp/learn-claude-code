@@ -23,6 +23,8 @@ ASCII flow:
                                               escalate /    429/529? -> backoff
                                               continue      other? -> log + exit
 """
+from __future__ import annotations
+
 
 import os, subprocess, time, random, json
 from pathlib import Path

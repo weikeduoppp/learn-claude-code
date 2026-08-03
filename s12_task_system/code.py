@@ -19,6 +19,8 @@ system. S11's full error recovery (RecoveryState, backoff, escalation,
 reactive compact, fallback model) is omitted — in real CC, tasks.ts and
 withRetry are independent layers that compose naturally.
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random
 from pathlib import Path

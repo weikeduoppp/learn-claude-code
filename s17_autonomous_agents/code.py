@@ -18,6 +18,8 @@ ASCII lifecycle:
   WORK: inbox → LLM → tools → (tool_use? loop) → (done? → IDLE)
   IDLE: 5s poll → inbox? → WORK / unclaimed? → claim → WORK / 60s? → SHUTDOWN
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random, threading
 from pathlib import Path

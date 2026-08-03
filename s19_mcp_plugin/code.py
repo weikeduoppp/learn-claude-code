@@ -20,6 +20,8 @@ ASCII flow:
   assemble_tool_pool → [builtin... , mcp__docs__search, mcp__docs__get_version]
   agent_loop uses assembled pool
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random, threading, re
 from pathlib import Path

@@ -19,6 +19,8 @@ ASCII flow:
                 └── inbox ← MessageBus ← teammate.send_message ←┘
   Teammate: inbox → LLM → bash/read/write/send → loop (max 10 turns)
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, random, threading, queue
 from pathlib import Path

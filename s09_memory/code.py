@@ -23,6 +23,8 @@ Builds on s08 (context compact). Usage:
     python s09_memory/code.py
     Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
 """
+from __future__ import annotations
+
 
 import os, subprocess, json, time, re
 from pathlib import Path

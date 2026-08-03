@@ -29,6 +29,8 @@ Tasks are the control plane and worktrees are the execution plane.
 
 Key insight: "Isolate by directory, coordinate by task ID."
 """
+from __future__ import annotations
+
 
 import json
 import os
