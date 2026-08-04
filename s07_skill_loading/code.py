@@ -28,7 +28,7 @@ Needs: pip install anthropic python-dotenv pyyaml + ANTHROPIC_API_KEY in .env
 from __future__ import annotations
 
 
-import ast, json, os, subprocess
+import ast, inspect, json, os, subprocess
 from pathlib import Path
 import yaml
 
@@ -66,6 +66,8 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, parts[2].strip()
 
 # Build skill registry at startup (used for safe lookup in load_skill)
+# SKILL_REGISTRY 除了安全边界，还有一个很重要的架构意义：它把“技能发现”与“技能使用”分开了。
+# 避免路径遍历。模型不能借 load_skill 这个工具随便指定文件路径去读磁盘上的任意内容
 SKILL_REGISTRY: dict[str, dict] = {}
 
 def _scan_skills():
@@ -209,6 +211,25 @@ def extract_text(content) -> str:
     return "\n".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
 
 
+def invoke_handler(handler, tool_input: dict) -> str:
+    """Call a handler with only the kwargs it actually accepts."""
+    if not isinstance(tool_input, dict):
+        return handler(tool_input)
+
+    sig = inspect.signature(handler)
+    params = sig.parameters.values()
+
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+        return handler(**tool_input)
+
+    filtered = {
+        name: value
+        for name, value in tool_input.items()
+        if name in sig.parameters
+    }
+    return handler(**filtered)
+
+
 # ═══════════════════════════════════════════════════════════
 #  FROM s06 (unchanged): Subagent
 # ═══════════════════════════════════════════════════════════
@@ -246,7 +267,7 @@ def spawn_subagent(description: str) -> str:
                                     "content": str(blocked)})
                     continue
                 handler = SUB_HANDLERS.get(block.name)
-                output = handler(**block.input) if handler else f"Unknown: {block.name}"
+                output = invoke_handler(handler, block.input) if handler else f"Unknown: {block.name}"
                 trigger_hooks("PostToolUse", block, output)
                 print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
@@ -392,7 +413,7 @@ def agent_loop(messages: list):
                 continue
 
             handler = TOOL_HANDLERS.get(block.name)
-            output = handler(**block.input) if handler else f"Unknown: {block.name}"
+            output = invoke_handler(handler, block.input) if handler else f"Unknown: {block.name}"
 
             trigger_hooks("PostToolUse", block, output)
 
