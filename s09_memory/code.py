@@ -284,7 +284,7 @@ def extract_memories(messages: list):
         pass
 
 
-CONSOLIDATE_THRESHOLD = 10
+CONSOLIDATE_THRESHOLD = 2
 
 def consolidate_memories():
     """Merge duplicate/stale memories. Triggered when file count ≥ threshold."""
