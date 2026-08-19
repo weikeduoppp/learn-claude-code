@@ -57,6 +57,9 @@ MAX_RECOVERY_RETRIES = 3
 MAX_RETRIES = 10
 BASE_DELAY_MS = 500
 MAX_CONSECUTIVE_529 = 3
+SIMULATE_SECOND_MAX_TOKENS = os.getenv("S11_SIMULATE_SECOND_MAX_TOKENS", "").lower() in {
+    "1", "true", "yes", "on"
+}
 CONTINUATION_PROMPT = (
     "Output token limit hit. Resume directly — "
     "no apology, no recap. Pick up mid-thought."
@@ -170,6 +173,62 @@ class RecoveryState:
         self.consecutive_529 = 0
         self.has_attempted_reactive_compact = False
         self.current_model = PRIMARY_MODEL
+        self.has_simulated_second_max_tokens = False
+        self.has_simulated_continuation_completion = False
+
+
+def text_block(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def block_type(block) -> str | None:
+    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+
+
+def block_text(block) -> str | None:
+    return block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
+
+
+def maybe_simulate_teaching_response(state: RecoveryState):
+    """Deterministic teaching hook for observing continuation recovery."""
+    if not SIMULATE_SECOND_MAX_TOKENS:
+        return None
+    if state.has_escalated and not state.has_simulated_second_max_tokens:
+        state.has_simulated_second_max_tokens = True
+        print("  \033[35m[teaching] simulating second max_tokens after escalation\033[0m")
+        return type("TeachingResponse", (), {
+            "stop_reason": "max_tokens",
+            "content": [text_block(
+                "// [simulated truncated output]\n"
+                "function recoveredPartOne() {\n"
+                "  return 'still truncated';\n"
+            )],
+        })()
+    if (state.has_simulated_second_max_tokens and state.recovery_count > 0
+            and not state.has_simulated_continuation_completion):
+        state.has_simulated_continuation_completion = True
+        print("  \033[35m[teaching] simulating successful continuation\033[0m")
+        return type("TeachingResponse", (), {
+            "stop_reason": "end_turn",
+            "content": [text_block(
+                "  // [simulated continuation]\n"
+                "  return 'continued successfully';\n"
+                "}\n"
+            )],
+        })()
+    return None
+
+
+def call_model(messages: list, system: str, state: RecoveryState, max_tokens: int):
+    simulated = maybe_simulate_teaching_response(state)
+    if simulated is not None:
+        return simulated
+    return with_retry(
+        lambda: client.messages.create(
+            model=state.current_model, system=system,
+            messages=messages, tools=TOOLS,
+            max_tokens=max_tokens),
+        state)
 
 
 def retry_delay(attempt, retry_after=None):
@@ -271,14 +330,9 @@ def agent_loop(messages: list, context: dict):
     max_tokens = DEFAULT_MAX_TOKENS
 
     while True:
-        # ── LLM call: with_retry handles 429/529, outer handles rest ──
+        # ── LLM call: teaching simulation or real request with retry ──
         try:
-            response = with_retry(
-                lambda: client.messages.create(
-                    model=state.current_model, system=system,
-                    messages=messages, tools=TOOLS,
-                    max_tokens=max_tokens),
-                state)
+            response = call_model(messages, system, state, max_tokens)
         except Exception as e:
             # Path 2: prompt_too_long -> reactive compact (once)
             if is_prompt_too_long_error(e):
@@ -328,7 +382,7 @@ def agent_loop(messages: list, context: dict):
         # ── Tool execution ──
         results = []
         for block in response.content:
-            if block.type != "tool_use":
+            if block_type(block) != "tool_use":
                 continue
             print(f"\033[36m> {block.name}\033[0m")
             handler = TOOL_HANDLERS.get(block.name)
@@ -344,6 +398,8 @@ def agent_loop(messages: list, context: dict):
 
 if __name__ == "__main__":
     print("s11: error recovery")
+    if SIMULATE_SECOND_MAX_TOKENS:
+        print("teaching mode: S11_SIMULATE_SECOND_MAX_TOKENS is enabled")
     print("Enter a question, press Enter to send. Type q to quit.\n")
     history = []
     context = update_context({}, [])
@@ -362,6 +418,6 @@ if __name__ == "__main__":
             if msg.get("role") != "assistant":
                 continue
             for block in msg["content"]:
-                if getattr(block, "type", None) == "text":
-                    print(block.text)
+                if block_type(block) == "text":
+                    print(block_text(block))
         print()

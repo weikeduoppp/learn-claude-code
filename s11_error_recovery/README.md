@@ -166,7 +166,7 @@ def agent_loop(messages, context):
 | 组件 | 之前 (s10) | 之后 (s11) |
 |------|-----------|-----------|
 | 错误处理 | 无（一碰就崩溃） | 三种恢复模式 + 指数退避 |
-| 新常量 | — | ESCALATED_MAX_TOKENS=64000, MAX_RETRIES=10, BASE_DELAY_MS=500, FALLBACK_MODEL |
+| 新常量 | — | ESCALATED_MAX_TOKENS=64000, MAX_RETRIES=10, BASE_DELAY_MS=500, FALLBACK_MODEL, S11_SIMULATE_SECOND_MAX_TOKENS |
 | 新函数 | — | with_retry, retry_delay, reactive_compact, is_prompt_too_long_error, RecoveryState |
 | 工具 | bash, read_file, write_file (3) | bash, read_file, write_file (3) — 不变 |
 | 循环 | 裸调用 LLM | try/except 包裹 + continue 重试 |
@@ -179,6 +179,19 @@ def agent_loop(messages, context):
 cd learn-claude-code
 python s11_error_recovery/code.py
 ```
+
+如果你想稳定观察 `[max_tokens] continuation`，可以打开教学模拟开关：
+
+```sh
+cd learn-claude-code
+S11_SIMULATE_SECOND_MAX_TOKENS=1 python3 s11_error_recovery/code.py
+```
+
+这个开关会在第一次真实 `max_tokens` 升级成功后，模拟一次“64K 仍然被截断”，然后再模拟一次续写成功。这样你不需要依赖真实 provider 是否支持超长非流式输出，也能稳定看到：
+
+- `[max_tokens] escalating`
+- `[max_tokens] continuation`
+- `[teaching] simulating successful continuation`
 
 试试这些 prompt：
 
