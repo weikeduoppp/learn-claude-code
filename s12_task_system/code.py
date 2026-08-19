@@ -97,7 +97,7 @@ def get_task(task_id: str) -> str:
     task = load_task(task_id)
     return json.dumps(asdict(task), indent=2)
 
-
+# 任务锁
 def can_start(task_id: str) -> bool:
     """Check if all blockedBy dependencies are completed.
     Missing dependencies are treated as blocked."""
@@ -109,7 +109,7 @@ def can_start(task_id: str) -> bool:
             return False
     return True
 
-
+# 领取任务
 def claim_task(task_id: str, owner: str = "agent") -> str:
     task = load_task(task_id)
     if task.status != "pending":
@@ -124,7 +124,7 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
     print(f"  \033[36m[claim] {task.subject} → in_progress (owner: {owner})\033[0m")
     return f"Claimed {task.id} ({task.subject})"
 
-
+# 完成任务后看看哪些下游任务可解锁
 def complete_task(task_id: str) -> str:
     task = load_task(task_id)
     if task.status != "in_progress":
