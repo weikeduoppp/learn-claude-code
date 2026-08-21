@@ -349,7 +349,7 @@ def collect_background_results() -> list[str]:
 
 DURABLE_PATH = WORKDIR / ".scheduled_tasks.json"
 
-
+# CronJob 是“未来工作定义”，不是立刻执行
 @dataclass
 class CronJob:
     id: str
@@ -466,7 +466,7 @@ def save_durable_jobs():
     durable = [asdict(j) for j in scheduled_jobs.values() if j.durable]
     DURABLE_PATH.write_text(json.dumps(durable, indent=2))
 
-
+# Durable 不是“进程关闭也会自动跑” > 调度定义跨重启保留，不是调度器跨进程常驻。- job 定义写进 `.scheduled_tasks.json` - 下次 Agent 启动时可以恢复
 def load_durable_jobs():
     """Load durable jobs from disk on startup."""
     if not DURABLE_PATH.exists():
@@ -517,7 +517,7 @@ def cancel_job(job_id: str) -> str:
     print(f"  \033[31m[cron cancel] {job_id}\033[0m")
     return f"Cancelled {job_id}"
 
-
+# `cron_scheduler_loop()` 每秒轮询一次，匹配到时间后把 job 放进 `cron_queue`，调度器只负责判定时机，不负责消费任务。
 def cron_scheduler_loop():
     """Independent daemon thread: poll every 1s, fire matching jobs.
     Individual job errors are caught to prevent one bad job from
@@ -688,6 +688,7 @@ def update_context(context: dict, messages: list) -> dict:
 def agent_loop(messages: list, context: dict) -> dict:
     system = get_system_prompt(context)
     while True:
+        # 真正进入主循环的是“已触发任务”，不是时间检查逻辑 `agent_loop()` 并不自己检查时间。 它只在开头消费 `cron_queue`，把已经触发的任务注入成 user message
         # Layer 4: consume fired cron jobs → inject as messages
         fired = consume_cron_queue()
         for job in fired:
@@ -771,7 +772,8 @@ def run_agent_turn_locked(user_query: str | None = None):
     print_latest_assistant_text(session_history)
     print()
 
-
+# 队列处理器负责“什么时候安全交付”
+# 仅仅把 job 放进队列还不够。  系统还要判断：Agent 当前是不是空闲，可以安全启动一轮处理。
 def queue_processor_loop():
     """Auto-deliver fired cron jobs when the agent is idle."""
     global session_context
