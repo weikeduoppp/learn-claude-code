@@ -389,7 +389,7 @@ def cron_matches(cron_expr: str, dt: datetime) -> bool:
     if len(fields) != 5:
         return False
     minute, hour, dom, month, dow = fields
-    dow_val = (dt.weekday() + 1) % 7  # Python Monday=0 → cron Sunday=0
+    dow_val 
 
     m = _cron_field_matches(minute, dt.minute)
     h = _cron_field_matches(hour, dt.hour)
