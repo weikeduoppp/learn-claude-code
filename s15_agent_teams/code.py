@@ -957,6 +957,7 @@ if __name__ == "__main__":
             history.append({"role": "user", "content": payload})
         else:  # "wake": teammate inbox or background results are ready
             parts = []
+            # 读自己信
             inbox = BUS.read_inbox("lead")
             if inbox:
                 parts.append("[Inbox]\n" + "\n".join(
