@@ -161,7 +161,7 @@ LLM 返回非 tool_use
   → 收到新消息 → 注入 messages → 继续 LLM turn
 ```
 
-教学版省略了 idle_notification 给 Lead 的通知。真实 CC 在 idle 时发 `idle_notification`，Lead 收到后知道队友空闲，可以分配新任务。
+教学版现在也会在队友进入 idle 时发送 `idle_notification` 给 Lead。这样 Lead 不只是知道队友“还活着”，而是明确知道队友已经空闲、可以继续分配新任务或发起 shutdown。
 
 ### 合起来跑
 
@@ -169,6 +169,7 @@ LLM 返回非 tool_use
 1. Lead: "让 Alice 创建一个文件，然后关机"
 2. Lead → spawn_teammate("alice", "backend", "创建 config.py")
 3. alice 线程启动 → write_file("config.py", "...") → 完成 → idle
+   → BUS.send("idle_notification", "alice is idle and ready")
 4. Lead → request_shutdown("alice")
    → BUS.send("shutdown_request", {request_id: "req_000142"})
 5. alice idle 轮询收到 → handle_shutdown_request
@@ -191,8 +192,8 @@ LLM 返回非 tool_use
 | 消息路由 | 全部当文本处理 | dispatch_message 按类型分发 |
 | 关机 | 自然退出或杀线程 | request_id 握手机制 |
 | 计划审批 | 无 | 消息流程示例（未实现执行门控） |
-| 新消息类型 | message, result | + shutdown_request/response, plan_approval_request/response |
-| 队友生命周期 | 最多 10 轮 | idle loop（等待 inbox 消息） |
+| 新消息类型 | message, result | + shutdown_request/response, plan_approval_request/response, idle_notification |
+| 队友生命周期 | 最多 10 轮 | idle loop（等待 inbox 消息，并在空闲时通知 Lead） |
 | Lead inbox | check_inbox 和主循环分别读 | 统一 consume_lead_inbox |
 | Lead 工具 | 14 (s15) | 14（核心工具集加入 request_shutdown, request_plan, review_plan） |
 | 队友工具 | 4 (s15) | + submit_plan (5) |
@@ -211,7 +212,7 @@ python s16_team_protocols/code.py
 1. `Spawn alice as a backend dev. Ask her to create a file. Then request her shutdown.`
 2. `Spawn bob with a refactoring task. Have him submit a plan first. Then review and approve it.`
 
-观察重点：关机握手是否完整（请求 → 确认 → 关机）？`pending_requests` 的状态是否正确转换？`request_id` 是否在请求和响应之间保持一致？队友 idle 后是否能收到 shutdown_request？
+观察重点：关机握手是否完整（请求 → 确认 → 关机）？`pending_requests` 的状态是否正确转换？`request_id` 是否在请求和响应之间保持一致？队友进入 idle 后是否会先发 `idle_notification`，然后还能收到 `shutdown_request`？
 
 ---
 

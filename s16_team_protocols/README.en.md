@@ -159,7 +159,7 @@ LLM returns non-tool_use
   → receives new message → inject into messages → continue LLM turn
 ```
 
-Teaching version omits idle_notification to Lead. Real CC sends `idle_notification` when idle, so Lead knows the teammate is free for new tasks.
+Teaching version now also sends `idle_notification` to Lead when a teammate enters idle. Lead can tell the teammate is explicitly free for a new assignment or a shutdown request.
 
 ### Putting It Together
 
@@ -167,6 +167,7 @@ Teaching version omits idle_notification to Lead. Real CC sends `idle_notificati
 1. Lead: "Have Alice create a file, then shut her down"
 2. Lead → spawn_teammate("alice", "backend", "Create config.py")
 3. alice thread starts → write_file("config.py", "...") → done → idle
+   → BUS.send("idle_notification", "alice is idle and ready")
 4. Lead → request_shutdown("alice")
    → BUS.send("shutdown_request", {request_id: "req_000142"})
 5. alice idle poll receives → handle_shutdown_request
@@ -189,8 +190,8 @@ Shutdown handshake complete: request → confirm → shutdown. Every step tracke
 | Message routing | All treated as text | dispatch_message routes by type |
 | Shutdown | Natural exit or kill thread | request_id handshake mechanism |
 | Plan approval | None | Message flow example (no execution gating) |
-| New message types | message, result | + shutdown_request/response, plan_approval_request/response |
-| Teammate lifecycle | Max 10 rounds | Idle loop (waits for inbox messages) |
+| New message types | message, result | + shutdown_request/response, plan_approval_request/response, idle_notification |
+| Teammate lifecycle | Max 10 rounds | Idle loop (waits for inbox messages and notifies Lead when idle) |
 | Lead inbox | check_inbox and main loop read separately | Unified consume_lead_inbox |
 | Lead tools | 14 (s15) | 14 (core tool set plus request_shutdown, request_plan, review_plan) |
 | Teammate tools | 4 (s15) | + submit_plan (5) |
@@ -209,7 +210,7 @@ Try these prompts:
 1. `Spawn alice as a backend dev. Ask her to create a file. Then request her shutdown.`
 2. `Spawn bob with a refactoring task. Have him submit a plan first. Then review and approve it.`
 
-What to observe: Is the shutdown handshake complete (request → confirm → shutdown)? Does `pending_requests` state transition correctly? Is `request_id` consistent between request and response? Can the idle teammate receive shutdown_request?
+What to observe: Is the shutdown handshake complete (request → confirm → shutdown)? Does `pending_requests` state transition correctly? Is `request_id` consistent between request and response? Does the teammate send `idle_notification` before idling, and can the idle teammate still receive shutdown_request?
 
 ---
 

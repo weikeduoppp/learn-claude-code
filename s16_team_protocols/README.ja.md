@@ -159,7 +159,7 @@ LLM が非 tool_use を返す
   → 新メッセージ受信 → messages に注入 → LLM ターン継続
 ```
 
-教学版は Lead への idle_notification を省略。真实 CC は idle 時に `idle_notification` を送信、Lead はチームメイトが空いていることを知り、新しいタスクを割り当て可能。
+教学版でも、チームメイトが idle に入ると Lead に `idle_notification` を送信するようになった。Lead はチームメイトが明示的に空いていると分かり、新しいタスク割り当てや shutdown request を出せる。
 
 ### 組み合わせて実行
 
@@ -167,6 +167,7 @@ LLM が非 tool_use を返す
 1. Lead: "Alice にファイルを作成させ、その後シャットダウン"
 2. Lead → spawn_teammate("alice", "backend", "config.py を作成")
 3. alice スレッド起動 → write_file("config.py", "...") → 完了 → idle
+   → BUS.send("idle_notification", "alice is idle and ready")
 4. Lead → request_shutdown("alice")
    → BUS.send("shutdown_request", {request_id: "req_000142"})
 5. alice idle ポーリング受信 → handle_shutdown_request
@@ -189,8 +190,8 @@ LLM が非 tool_use を返す
 | メッセージルーティング | 全てテキストとして処理 | dispatch_message がタイプ別にルーティング |
 | シャットダウン | 自然終了またはスレッド強制終了 | request_id ハンドシェイク機構 |
 | 計画承認 | なし | メッセージフローの例（実行ゲーティングなし） |
-| 新規メッセージ型 | message, result | + shutdown_request/response, plan_approval_request/response |
-| チームメイトライフサイクル | 最大 10 ラウンド | idle loop（inbox メッセージを待機） |
+| 新規メッセージ型 | message, result | + shutdown_request/response, plan_approval_request/response, idle_notification |
+| チームメイトライフサイクル | 最大 10 ラウンド | idle loop（inbox メッセージを待機し、idle 時は Lead に通知） |
 | Lead inbox | check_inbox とメインループが別々に読み取り | 統一 consume_lead_inbox |
 | Lead ツール | 14 (s15) | 14（コアツールセットに request_shutdown、request_plan、review_plan を追加） |
 | チームメイトツール | 4 (s15) | + submit_plan (5) |
@@ -209,7 +210,7 @@ python s16_team_protocols/code.py
 1. `Spawn alice as a backend dev. Ask her to create a file. Then request her shutdown.`
 2. `Spawn bob with a refactoring task. Have him submit a plan first. Then review and approve it.`
 
-観察ポイント：シャットダウンハンドシェイクは完了しているか（リクエスト → 確認 → シャットダウン）？`pending_requests` の状態は正しく遷移しているか？`request_id` はリクエストとレスポンス間で一貫しているか？idle チームメイトは shutdown_request を受信できるか？
+観察ポイント：シャットダウンハンドシェイクは完了しているか（リクエスト → 確認 → シャットダウン）？`pending_requests` の状態は正しく遷移しているか？`request_id` はリクエストとレスポンス間で一貫しているか？チームメイトは idle 前に `idle_notification` を送るか？idle 状態でも shutdown_request を受信できるか？
 
 ---
 

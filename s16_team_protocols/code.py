@@ -14,6 +14,7 @@ Changes from s15:
   - handle_shutdown_request / handle_plan_response: teammate receives & responds
   - match_response: Lead correlates response to request via request_id (with type validation)
   - Teammate idle loop: waits for inbox messages instead of exiting after 10 rounds
+  - idle_notification: teammate notifies Lead when it becomes idle
   - Unified consume_lead_inbox: protocol routing + injection into history
   - 3 new Lead tools: request_shutdown, request_plan, review_plan
   - 1 new teammate tool: submit_plan
@@ -437,6 +438,31 @@ def consume_lead_inbox(route_protocol: bool = True) -> list[dict]:
     return msgs
 
 
+def format_inbox_messages(msgs: list[dict]) -> list[str]:
+    """Render inbox messages with type tags so notifications stay visible."""
+    lines = []
+    for msg in msgs:
+        meta = msg.get("metadata", {})
+        req_id = meta.get("request_id", "")
+        tag = f"[{msg.get('type', 'message')}"
+        if req_id:
+            tag += f" req:{req_id}"
+        tag += "]"
+        lines.append(f"From {msg['from']} {tag}: {msg['content'][:200]}")
+    return lines
+
+
+def send_idle_notification(name: str, role: str):
+    """Notify Lead that a teammate is idle and available for more work."""
+    BUS.send(
+        name,
+        "lead",
+        f"{name} ({role}) is idle and ready for a new task.",
+        "idle_notification",
+        {"state": "idle", "role": role},
+    )
+
+
 # ── Teammate Thread (s16: idle loop + dispatch) ──
 
 def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
@@ -542,8 +568,8 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
 
             messages.append({"role": "assistant", "content": response.content})
             if response.stop_reason != "tool_use":
-                # Idle: wait for inbox messages instead of exiting
-                # Real CC sends idle_notification to Lead here
+                # Notify Lead once per WORK -> IDLE transition, then wait.
+                send_idle_notification(name, role)
                 while not shutdown_requested:
                     time.sleep(1)
                     inbox = BUS.read_inbox(name)
@@ -672,13 +698,7 @@ def run_check_inbox() -> str:
     msgs = consume_lead_inbox(route_protocol=True)
     if not msgs:
         return "(inbox empty)"
-    lines = []
-    for m in msgs:
-        meta = m.get("metadata", {})
-        req_id = meta.get("request_id", "")
-        tag = f" [{m['type']} req:{req_id}]" if req_id else f" [{m['type']}]"
-        lines.append(f"  [{m['from']}]{tag} {m['content'][:200]}")
-    return "\n".join(lines)
+    return "\n".join(format_inbox_messages(msgs))
 
 
 # ── Tool Dispatch ──
@@ -876,8 +896,7 @@ if __name__ == "__main__":
         # Check inbox → route protocol + inject into history
         inbox_msgs = consume_lead_inbox(route_protocol=True)
         if inbox_msgs:
-            inbox_text = "\n".join(
-                f"From {m['from']}: {m['content'][:200]}" for m in inbox_msgs)
+            inbox_text = "\n".join(format_inbox_messages(inbox_msgs))
             history.append({"role": "user",
                             "content": f"[Inbox]\n{inbox_text}"})
             print(f"\n\033[33m[Inbox: {len(inbox_msgs)} messages injected]\033[0m")

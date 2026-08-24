@@ -77,6 +77,12 @@ def terminal_print(text: str):
 TASKS_DIR = WORKDIR / ".tasks"
 TASKS_DIR.mkdir(exist_ok=True)
 CURRENT_TODOS: list[dict] = []
+TODO_STATUSES = ("pending", "in_progress", "completed")
+TODO_ICONS = {
+    "pending": " ",
+    "in_progress": "\033[36m▸\033[0m",
+    "completed": "\033[32m✓\033[0m",
+}
 
 
 @dataclass

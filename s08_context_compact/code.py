@@ -56,6 +56,12 @@ TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 CURRENT_TODOS: list[dict] = []
+TODO_STATUSES = ("pending", "in_progress", "completed")
+TODO_ICONS = {
+    "pending": " ",
+    "in_progress": "\033[36m▸\033[0m",
+    "completed": "\033[32m✓\033[0m",
+}
 
 # s07: Skill catalog scan (inherited from s07)
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -183,7 +189,7 @@ def _normalize_todos(todos):
             return None, f"Error: todos[{i}] must be an object"
         if "content" not in t or "status" not in t:
             return None, f"Error: todos[{i}] missing 'content' or 'status'"
-        if t["status"] not in ("pending", "in_progress", "completed"):
+        if t["status"] not in TODO_STATUSES:
             return None, f"Error: todos[{i}] has invalid status '{t['status']}'"
     return todos, None
 
@@ -195,7 +201,7 @@ def run_todo_write(todos: list) -> str:
     CURRENT_TODOS = todos
     lines = ["\n\033[33m## Current Tasks\033[0m"]
     for t in CURRENT_TODOS:
-        icon = {"pending": " ", "in_progress": "\033[36m▸\033[0m", "completed": "\033[32m✓\033[0m"}[t["status"]]
+        icon = TODO_ICONS[t["status"]]
         lines.append(f"  [{icon}] {t['content']}")
     print("\n".join(lines))
     return f"Updated {len(CURRENT_TODOS)} tasks"
