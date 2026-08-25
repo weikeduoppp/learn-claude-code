@@ -20,14 +20,14 @@ s16 的队友能通信、能握手关机。但每个队友等 Lead 分配任务�
 
 ![Autonomous Agents Overview](images/autonomous-agents-overview.svg)
 
-沿用 S16 的教学版 MessageBus 和协议工具。本章新增：**idle_poll**（空闲时每 5 秒轮询一次）、**scan_unclaimed_tasks**（扫描看板上可认领的任务）、**自动认领**（找到任务就 claim，不用 Lead 操心）。
+沿用 S16 的教学版 MessageBus 和协议工具。本章新增：**idle_notification**（队友进入空闲时通知 Lead）、**task watcher**（监听 `.tasks/` 变化并唤醒 idle 队友）、**idle_poll**（空闲时每 5 秒轮询一次）、**scan_unclaimed_tasks**（扫描看板上可认领的任务）、**自动认领**（找到任务就 claim，不用 Lead 操心），以及 **release_task**（把残留的 `in_progress` 任务放回 `pending`）。
 
 队友生命周期从两阶段变成三阶段：
 
 | 阶段 | 行为 | 退出条件 |
 |------|------|---------|
 | WORK | inbox → LLM → 工具循环 | `stop_reason != tool_use` |
-| IDLE | 每 5s 轮询 inbox + 任务板 | 60s 超时 |
+| IDLE | 先发 idle_notification，随后由 task watcher 或 5s 轮询唤醒检查 inbox + 任务板 | 60s 超时 |
 | SHUTDOWN | 发 summary，退出 | — |
 
 ---
@@ -36,16 +36,23 @@ s16 的队友能通信、能握手关机。但每个队友等 Lead 分配任务�
 
 ### idle_poll: 空闲轮询
 
-队友完成当前任务后不退出，进入 IDLE 阶段——每 5 秒检查一次有没有新工作：
+队友完成当前任务后不退出，先向 Lead 发一条 `idle_notification`，再进入 IDLE 阶段。IDLE 阶段有两种唤醒源：
+
+- `task watcher`：`.tasks/` 目录变化并稳定 1 秒后，立即唤醒 idle 队友重查
+- 兜底轮询：最多每 5 秒自己醒一次，防止 watcher 漏通知
+
+教学版代码现在是：
 
 ```python
 IDLE_POLL_INTERVAL = 5   # seconds
 IDLE_TIMEOUT = 60         # seconds
+TASK_WATCH_DEBOUNCE = 1.0
 
 def idle_poll(name, messages, role) -> str:
     """Return 'work', 'shutdown', or 'timeout'."""
     for _ in range(IDLE_TIMEOUT // IDLE_POLL_INTERVAL):
-        time.sleep(IDLE_POLL_INTERVAL)
+        wake_event.wait(IDLE_POLL_INTERVAL)
+        wake_event.clear()
 
         # ① 检查收件箱（优先）
         inbox = BUS.read_inbox(name)
@@ -71,6 +78,24 @@ def idle_poll(name, messages, role) -> str:
 ```
 
 inbox 优先（可能包含 shutdown_request 等协议消息），任务板其次。IDLE 阶段收到 shutdown_request 会直接回复并退出，不等到下一轮 WORK。
+
+进入 IDLE 前的通知和 watcher 注册是单独一步：
+
+```python
+idle_teammates.add(name)
+send_idle_notification(name, role)
+idle_result = idle_poll(name, messages, role)
+```
+
+这样 Lead 不需要靠猜测判断“队友是不是空着”，而是能显式收到：
+
+`[idle_notification] alice (backend) is idle and ready for more work.`
+
+而 task watcher 的作用是：
+
+- 新任务创建时，不必等到下一个 5 秒轮询
+- 前置任务完成、依赖解锁时，也能更快触发重查
+- 依赖判断仍然是 `blockedBy` 里没有未完成任务，不是 `blockedBy` 必须为空
 
 ### scan_unclaimed_tasks: 扫描任务看板
 
@@ -197,12 +222,13 @@ if len(messages) <= 3:
 | 任务分配 | Lead 手动 assign | 队友自动认领（can_start 检查依赖） |
 | 队友状态 | WORK → IDLE（每 1s 轮询 inbox）→ WORK / SHUTDOWN | WORK → IDLE（每 5s 轮询 inbox + 任务板，60s 超时）→ WORK / SHUTDOWN |
 | claim_task | 无 owner 检查 | 拒绝已有 owner 的任务 |
+| release_task | 无 | 可把 stale `in_progress` 任务退回 `pending` |
 | IDLE 阶段关机 | 收到 shutdown_request 后退出 | 直接 dispatch shutdown 并退出 |
 | Lead inbox | consume_lead_inbox 路由协议响应并注入上下文 | 沿用 consume_lead_inbox 机制 |
 | 新函数 | 已有 consume_lead_inbox | idle_poll, scan_unclaimed_tasks（沿用 consume_lead_inbox） |
 | 身份保持 | 仅 system prompt | 压缩后自动重注入 |
 | Lead 工具 | 14 | 14（不变） |
-| 队友工具 | 5 | 8（+ list_tasks, claim_task, complete_task） |
+| 队友工具 | 5 | 9（+ list_tasks, claim_task, release_task, complete_task） |
 | 队友退出条件 | WORK 完进入 IDLE，等待 shutdown_request 后退出（无超时） | 60s 无新任务或收到 shutdown_request 后退出 |
 
 ---
@@ -235,13 +261,13 @@ s18 Worktree Isolation → 每个任务有自己的工作目录，互不干扰�
 
 ### 一、CC 的空闲机制：组合路径，不是单一轮询
 
-教学版用一个 `idle_poll()` 统一处理空闲时的 inbox 检查和任务认领。CC 的实际实现是四个机制的组合：
+教学版现在是“`idle_notification` + `task watcher` + `idle_poll()`”的组合：先通知 Lead 自己已空闲，再由 watcher 优先唤醒，轮询作为兜底。CC 的实际实现仍然是四个机制的组合：
 
 **idle_notification**：队友完成一轮工作后，`sendIdleNotification()`（`inProcessRunner.ts:569-589`）向 Lead 发送空闲通知。Lead 知道队友可用了，可以分配新任务或请求关机。
 
 **mailbox 轮询**：`waitForNextPromptOrShutdown()`（`inProcessRunner.ts:689-868`）是一个 **500ms 轮询循环**，持续检查三类来源：pending user messages、mailbox 文件消息、task list。shutdown_request 被优先处理（`inProcessRunner.ts:768-804`），不会被普通消息饿死。
 
-**task watcher**：`useTaskListWatcher`（`hooks/useTaskListWatcher.ts:34-189`）用 `fs.watch()` 监听 `.claude/tasks/` 目录变化，1 秒 debounce，当新任务创建或依赖解锁时触发检查。依赖判断（`L197-207`）是"blockedBy 中没有未完成的任务"，不是"blockedBy 为空"。
+**task watcher**：`useTaskListWatcher`（`hooks/useTaskListWatcher.ts:34-189`）用 `fs.watch()` 监听 `.claude/tasks/` 目录变化，1 秒 debounce，当新任务创建或依赖解锁时触发检查。依赖判断（`L197-207`）是"blockedBy 中没有未完成的任务"，不是"blockedBy 为空"。教学版现在用无依赖的目录快照 watcher 做近似实现：监听 `.tasks/` 的稳定变化，然后唤醒 idle 队友立即重查。
 
 **主动 claim**：轮询循环内部也会调用 `tryClaimNextTask()`（`inProcessRunner.ts:853-860`）——在等待期间主动从 task list 领取任务。所以"队友不主动轮询任务"不准确，CC 同时有被动通知和主动认领。
 
@@ -255,7 +281,7 @@ s18 Worktree Isolation → 每个任务有自己的工作目录，互不干扰�
 
 | 维度 | 教学版 (s17) | CC |
 |------|-------------|-----|
-| 空闲机制 | idle_poll 统一轮询（5s） | idle_notification + 500ms mailbox 轮询 + task watcher |
+| 空闲机制 | idle_notification + task watcher + idle_poll（5s 兜底） | idle_notification + 500ms mailbox 轮询 + task watcher |
 | 任务发现 | scan_unclaimed_tasks（轮询） | useTaskListWatcher（文件监听）+ tryClaimNextTask（主动轮询） |
 | 依赖判断 | can_start（所有 blockedBy 已完成） | findAvailableTask（同样语义） |
 | 并发安全 | owner 检查（无文件锁） | proper-lockfile 任务锁 + task-list 锁 |
@@ -264,7 +290,7 @@ s18 Worktree Isolation → 每个任务有自己的工作目录，互不干扰�
 | 身份保持 | messages 长度检测 | context compaction 保留 system prompt |
 | claim 失败处理 | 检查返回值，失败不注入 | 文件锁保证原子性 |
 
-教学版的 `idle_poll()` 把 CC 的四个机制合并成一个轮询函数——简化合理，因为核心语义（空闲时找活干、依赖解锁后可认领、shutdown 优先）是一致的。
+教学版现在把 CC 的“空闲通知 + watcher + 轮询兜底”都补进来了，只是 watcher 仍然是简化实现，不是 `fs.watch()`。核心语义保持一致：空闲时找活干、依赖解锁后及时重查、shutdown 优先。
 
 </details>
 

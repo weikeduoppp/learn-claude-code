@@ -7,10 +7,13 @@ Need: pip install anthropic python-dotenv + .env with ANTHROPIC_API_KEY
 
 Changes from s16:
   - scan_unclaimed_tasks: find pending, unowned tasks with deps completed
+  - task watcher: debounced task-board watcher wakes idle teammates on changes
   - idle_poll: 60s polling loop (inbox + task board), dispatches shutdown in IDLE
+  - idle_notification: teammate notifies Lead when entering IDLE
   - claim_task: owner check + return value verification
+  - release_task: reset stale in_progress work back to pending
   - Teammate lifecycle: WORK → IDLE → SHUTDOWN
-  - Teammate tools: + list_tasks, claim_task, complete_task (5→8)
+  - Teammate tools: + list_tasks, claim_task, release_task, complete_task (5→9)
   - consume_lead_inbox: unified inbox consumer for protocol + context injection
   - Identity re-injection after context compression
 
@@ -21,7 +24,7 @@ ASCII lifecycle:
 from __future__ import annotations
 
 
-import os, subprocess, json, time, random, threading
+import os, subprocess, json, time, random, threading, inspect
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, asdict, field
@@ -139,12 +142,26 @@ def complete_task(task_id: str) -> str:
     return msg
 
 
+def release_task(task_id: str) -> str:
+    task = load_task(task_id)
+    if task.status != "in_progress":
+        return f"Task {task_id} is {task.status}, cannot release"
+    previous_owner = task.owner or "unknown"
+    task.status = "pending"
+    task.owner = None
+    save_task(task)
+    print(f"  \033[33m[release] {task.subject} ← pending "
+          f"(was owned by {previous_owner})\033[0m")
+    return (f"Released {task.id} ({task.subject}) back to pending "
+            f"(previous owner: {previous_owner})")
+
+
 # ── Prompt Assembly (from s10) ──
 
 PROMPT_SECTIONS = {
     "identity": "You are a coding agent. Act, don't explain.",
     "tools": "Available tools: bash, read_file, write_file, "
-             "create_task, list_tasks, get_task, claim_task, complete_task, "
+             "create_task, list_tasks, get_task, claim_task, release_task, complete_task, "
              "spawn_teammate, send_message, check_inbox, "
              "request_shutdown, request_plan, review_plan.",
     "workspace": f"Working directory: {WORKDIR}",
@@ -182,14 +199,17 @@ def safe_path(p: str) -> Path:
     return path
 
 
-def run_bash(command: str) -> str:
+def run_bash(command: str, timeout_ms: int | None = None) -> str:
+    timeout_s = 120
+    if timeout_ms is not None:
+        timeout_s = max(1, min(int(timeout_ms), 300000)) / 1000
     try:
         r = subprocess.run(command, shell=True, cwd=WORKDIR,
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=timeout_s)
         out = (r.stdout + r.stderr).strip()
         return out[:50000] if out else "(no output)"
     except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+        return f"Error: Timeout ({timeout_s:g}s)"
 
 
 def run_read(path: str, limit: int | None = None) -> str:
@@ -210,6 +230,26 @@ def run_write(path: str, content: str) -> str:
         return f"Wrote {len(content)} bytes to {path}"
     except Exception as e:
         return f"Error: {e}"
+
+
+def invoke_handler(handler, tool_input: dict | None):
+    """Call a tool handler while tolerating extra model-supplied fields."""
+    tool_input = tool_input or {}
+    sig = inspect.signature(handler)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD
+           for p in sig.parameters.values()):
+        return handler(**tool_input)
+    accepted = {
+        name for name, param in sig.parameters.items()
+        if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                          inspect.Parameter.KEYWORD_ONLY)
+    }
+    filtered = {k: v for k, v in tool_input.items() if k in accepted}
+    ignored = sorted(set(tool_input) - accepted)
+    if ignored:
+        print(f"  \033[33m[tool args] ignored for {handler.__name__}: "
+              f"{', '.join(ignored)}\033[0m")
+    return handler(**filtered)
 
 
 # ── MessageBus (from s15) ──
@@ -242,6 +282,11 @@ class MessageBus:
 
 BUS = MessageBus()
 active_teammates: dict[str, bool] = {}
+teammate_specs: dict[str, dict[str, str]] = {}
+idle_teammates: set[str] = set()
+teammate_wake_events: dict[str, threading.Event] = {}
+_task_watcher_started = False
+_task_watcher_lock = threading.Lock()
 
 
 # ── Protocol State (from s16) ──
@@ -289,6 +334,8 @@ def match_response(response_type: str, request_id: str, approve: bool):
 
 IDLE_POLL_INTERVAL = 5   # seconds
 IDLE_TIMEOUT = 60         # seconds
+TASK_WATCH_POLL_INTERVAL = 0.2
+TASK_WATCH_DEBOUNCE = 1.0
 
 
 def scan_unclaimed_tasks() -> list[dict]:
@@ -303,10 +350,95 @@ def scan_unclaimed_tasks() -> list[dict]:
     return unclaimed
 
 
+def _task_board_snapshot() -> tuple[tuple[str, int, int], ...]:
+    snapshot = []
+    for path in sorted(TASKS_DIR.glob("task_*.json")):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        snapshot.append((path.name, stat.st_mtime_ns, stat.st_size))
+    return tuple(snapshot)
+
+
+def wake_idle_teammates(reason: str):
+    """Wake currently idle teammates so they can re-check the task board."""
+    targets = [name for name in sorted(idle_teammates) if name in active_teammates]
+    if not targets:
+        return
+    for name in targets:
+        teammate_wake_events.setdefault(name, threading.Event()).set()
+    print(f"  \033[35m[task watcher] {reason} → wake idle teammates: "
+          f"{', '.join(targets)}\033[0m")
+
+
+def task_watcher_loop():
+    """Watch the task board for stable changes and wake idle teammates."""
+    last_snapshot = _task_board_snapshot()
+    pending_change_at = None
+    pending_reason = "task board changed"
+    while True:
+        time.sleep(TASK_WATCH_POLL_INTERVAL)
+        current = _task_board_snapshot()
+        if current != last_snapshot:
+            last_snapshot = current
+            pending_change_at = time.time()
+            continue
+        if pending_change_at is None:
+            continue
+        if time.time() - pending_change_at < TASK_WATCH_DEBOUNCE:
+            continue
+        pending_change_at = None
+        wake_idle_teammates(pending_reason)
+
+
+def ensure_task_watcher_started():
+    global _task_watcher_started
+    with _task_watcher_lock:
+        if _task_watcher_started:
+            return
+        threading.Thread(target=task_watcher_loop, daemon=True).start()
+        _task_watcher_started = True
+        print("  \033[35m[task watcher] started\033[0m")
+
+
+def maybe_respawn_teammate(name: str) -> str | None:
+    """Respawn a known teammate if it has shut down."""
+    if name == "lead" or name in active_teammates:
+        return None
+    spec = teammate_specs.get(name)
+    if not spec:
+        return None
+    print(f"  \033[35m[respawn] restarting teammate '{name}'\033[0m")
+    return spawn_teammate_thread(name, spec["role"], spec["prompt"])
+
+
+def send_agent_message(from_agent: str, to_agent: str, content: str) -> str:
+    """Send a message, auto-respawning a known teammate if needed."""
+    respawn_note = maybe_respawn_teammate(to_agent)
+    BUS.send(from_agent, to_agent, content)
+    if respawn_note:
+        return f"Sent to {to_agent} ({respawn_note})"
+    return f"Sent to {to_agent}"
+
+
+def send_idle_notification(name: str, role: str):
+    """Notify Lead that a teammate finished a work round and is idle."""
+    BUS.send(
+        name,
+        "lead",
+        f"{name} ({role}) is idle and ready for more work.",
+        "idle_notification",
+        {"state": "idle", "role": role},
+    )
+
+
 def idle_poll(name: str, messages: list, role: str) -> str:
     """Poll for 60s. Return 'work', 'shutdown', or 'timeout'."""
+    wake_event = teammate_wake_events.setdefault(name, threading.Event())
     for _ in range(IDLE_TIMEOUT // IDLE_POLL_INTERVAL):
-        time.sleep(IDLE_POLL_INTERVAL)
+        wake_event.wait(IDLE_POLL_INTERVAL)
+        wake_event.clear()
 
         # Check inbox — dispatch protocol messages first
         inbox = BUS.read_inbox(name)
@@ -352,6 +484,9 @@ def idle_poll(name: str, messages: list, role: str) -> str:
 def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
     if name in active_teammates:
         return f"Teammate '{name}' already exists"
+    ensure_task_watcher_started()
+    teammate_specs[name] = {"role": role, "prompt": prompt}
+    teammate_wake_events.setdefault(name, threading.Event())
 
     system = (f"You are '{name}', a {role}. "
               f"Use tools to complete tasks. "
@@ -387,7 +522,9 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
         sub_tools = [
             {"name": "bash", "description": "Run a shell command.",
              "input_schema": {"type": "object",
-                              "properties": {"command": {"type": "string"}},
+                              "properties": {
+                                  "command": {"type": "string"},
+                                  "timeout_ms": {"type": "integer"}},
                               "required": ["command"]}},
             {"name": "read_file", "description": "Read file.",
              "input_schema": {"type": "object",
@@ -419,6 +556,11 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
              "input_schema": {"type": "object",
                               "properties": {"task_id": {"type": "string"}},
                               "required": ["task_id"]}},
+            {"name": "release_task",
+             "description": "Release an in-progress task back to pending.",
+             "input_schema": {"type": "object",
+                              "properties": {"task_id": {"type": "string"}},
+                              "required": ["task_id"]}},
             {"name": "complete_task",
              "description": "Mark an in-progress task as completed.",
              "input_schema": {"type": "object",
@@ -432,21 +574,25 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 return "No tasks."
             return "\n".join(
                 f"  {t.id}: {t.subject} [{t.status}]"
+                + (f" owner={t.owner}" if t.owner else "")
                 for t in tasks)
 
         def _run_claim_task(task_id: str):
             return claim_task(task_id, owner=name)
+
+        def _run_release_task(task_id: str):
+            return release_task(task_id)
 
         def _run_complete_task(task_id: str):
             return complete_task(task_id)
 
         sub_handlers = {
             "bash": run_bash, "read_file": run_read, "write_file": run_write,
-            "send_message": lambda to, content: (BUS.send(name, to, content),
-                                                  "Sent")[1],
+            "send_message": lambda to, content: send_agent_message(name, to, content),
             "submit_plan": lambda plan: _teammate_submit_plan(name, plan),
             "list_tasks": _run_list_tasks,
             "claim_task": _run_claim_task,
+            "release_task": _run_release_task,
             "complete_task": _run_complete_task,
         }
 
@@ -489,7 +635,8 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 for block in response.content:
                     if block.type == "tool_use":
                         handler = sub_handlers.get(block.name)
-                        output = handler(**block.input) if handler else "Unknown"
+                        output = (invoke_handler(handler, block.input)
+                                  if handler else "Unknown")
                         results.append({"type": "tool_result",
                                         "tool_use_id": block.id,
                                         "content": str(output)})
@@ -499,7 +646,11 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 break
 
             # IDLE phase (s17 new)
+            idle_teammates.add(name)
+            teammate_wake_events.setdefault(name, threading.Event()).clear()
+            send_idle_notification(name, role)
             idle_result = idle_poll(name, messages, role)
+            idle_teammates.discard(name)
             if idle_result == "shutdown":
                 break
             if idle_result == "timeout":
@@ -517,6 +668,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                     continue
                 break
         BUS.send(name, "lead", summary, "result")
+        idle_teammates.discard(name)
         active_teammates.pop(name, None)
         print(f"  \033[32m[teammate] {name} finished\033[0m")
 
@@ -595,6 +747,7 @@ def run_list_tasks() -> str:
         return "No tasks."
     return "\n".join(
         f"  {t.id}: {t.subject} [{t.status}]"
+        + (f" owner={t.owner}" if t.owner else "")
         for t in tasks)
 
 
@@ -606,6 +759,10 @@ def run_claim_task(task_id: str) -> str:
     return claim_task(task_id, owner="agent")
 
 
+def run_release_task(task_id: str) -> str:
+    return release_task(task_id)
+
+
 def run_complete_task(task_id: str) -> str:
     return complete_task(task_id)
 
@@ -615,8 +772,7 @@ def run_spawn_teammate(name: str, role: str, prompt: str) -> str:
 
 
 def run_send_message(to: str, content: str) -> str:
-    BUS.send("lead", to, content)
-    return f"Sent to {to}"
+    return send_agent_message("lead", to, content)
 
 
 def consume_lead_inbox(route_protocol=True) -> list[dict]:
@@ -650,7 +806,9 @@ def run_check_inbox() -> str:
 TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object",
-                      "properties": {"command": {"type": "string"}},
+                      "properties": {
+                          "command": {"type": "string"},
+                          "timeout_ms": {"type": "integer"}},
                       "required": ["command"]}},
     {"name": "read_file", "description": "Read file contents.",
      "input_schema": {"type": "object",
@@ -680,6 +838,11 @@ TOOLS = [
                       "required": ["task_id"]}},
     {"name": "claim_task",
      "description": "Claim a pending task.",
+     "input_schema": {"type": "object",
+                      "properties": {"task_id": {"type": "string"}},
+                      "required": ["task_id"]}},
+    {"name": "release_task",
+     "description": "Release an in-progress task back to pending.",
      "input_schema": {"type": "object",
                       "properties": {"task_id": {"type": "string"}},
                       "required": ["task_id"]}},
@@ -729,7 +892,8 @@ TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "create_task": run_create_task, "list_tasks": run_list_tasks,
     "get_task": run_get_task,
-    "claim_task": run_claim_task, "complete_task": run_complete_task,
+    "claim_task": run_claim_task, "release_task": run_release_task,
+    "complete_task": run_complete_task,
     "spawn_teammate": run_spawn_teammate,
     "send_message": run_send_message, "check_inbox": run_check_inbox,
     "request_shutdown": run_request_shutdown,
@@ -774,7 +938,7 @@ def agent_loop(messages: list, context: dict):
                 continue
             print(f"\033[36m> {block.name}\033[0m")
             handler = TOOL_HANDLERS.get(block.name)
-            output = handler(**block.input) if handler else "Unknown"
+            output = invoke_handler(handler, block.input) if handler else "Unknown"
             print(str(output)[:300])
             results.append({"type": "tool_result",
                             "tool_use_id": block.id, "content": output})
